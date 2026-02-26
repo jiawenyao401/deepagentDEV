@@ -9,125 +9,130 @@ from typing import Any
 
 
 class DeepAgent:
-    """LangChain Deep-Agents-style orchestrator.
-
-    This implementation follows a standardized multi-stage agent flow:
-    1) PLAN  : build a concise execution plan
-    2) ACT   : generate a final response using the plan
-    3) STREAM: return incremental chunks to SSE consumers
-
-    If LangChain is unavailable at runtime, a deterministic local fallback is used.
-    """
+    """Deep Agent runtime using LangChain official Deep Agents API when available."""
 
     async def stream(self, session_id: str, user_input: str) -> AsyncIterator[str]:
-        result = await self._run_deep_agent(session_id=session_id, user_input=user_input)
-        for token in result.split():
+        text = await self._run(session_id=session_id, user_input=user_input)
+        for token in text.split():
             yield token + " "
             await asyncio.sleep(0.02)
 
-    async def _run_deep_agent(self, session_id: str, user_input: str) -> str:
-        chain = self._build_langchain_chain()
-        if chain is None:
-            return self._fallback_response(session_id=session_id, user_input=user_input)
+    async def _run(self, session_id: str, user_input: str) -> str:
+        create_deep_agent = self._load_official_deep_agent_factory()
+        if create_deep_agent is None:
+            return self._fallback(
+                session_id=session_id,
+                user_input=user_input,
+                reason="未检测到官方 Deep Agents API（create_deep_agent）",
+            )
 
-        inputs = {
-            "session_id": session_id,
-            "user_input": user_input,
-            "platform_goal": "前端调用CLI，CLI调用Server，并通过SSE流式返回",
-        }
-        output = await chain.ainvoke(inputs)
-        return str(output)
+        model = self._build_model()
+        if model is None:
+            return self._fallback(
+                session_id=session_id,
+                user_input=user_input,
+                reason="模型初始化失败（检查 LLM_PROVIDER / LLM_MODEL / API Key）",
+            )
 
-    def _build_langchain_chain(self) -> Any | None:
-        """Build a LangChain-standardized PLAN->ACT chain when dependencies exist."""
-        if importlib.util.find_spec("langchain_core") is None:
-            return None
-
-        prompts = importlib.import_module("langchain_core.prompts")
-        output_parsers = importlib.import_module("langchain_core.output_parsers")
-        runnables = importlib.import_module("langchain_core.runnables")
-
-        ChatPromptTemplate = prompts.ChatPromptTemplate
-        StrOutputParser = output_parsers.StrOutputParser
-        RunnableLambda = runnables.RunnableLambda
-
-        plan_prompt = ChatPromptTemplate.from_template(
-            """
-你是 Deep Agents 平台架构师。请基于用户诉求，先输出一个3步执行计划。
-要求：
-- 每步一句话
-- 聚焦架构与调用链
-- 用中文输出
-
-会话: {session_id}
-平台目标: {platform_goal}
-用户输入: {user_input}
-            """.strip()
+        system_prompt = (
+            "你是一个基于 LangChain Deep Agents 官方标准实现的架构智能体。"
+            "请围绕前端->CLI->Server->SSE流程给出可执行方案。"
         )
 
-        act_prompt = ChatPromptTemplate.from_template(
-            """
-你是 Deep Agents 执行智能体。根据 PLAN 给出可执行答复：
-- 先给架构结论
-- 再给调用流程（前端->CLI->Server->SSE）
-- 最后给最小落地建议
-
-会话: {session_id}
-用户输入: {user_input}
-PLAN:
-{plan}
-            """.strip()
-        )
-
-        parser = StrOutputParser()
-
-        provider = os.getenv("LLM_PROVIDER", "mock")
-        if provider == "mock":
-            plan_chain = plan_prompt | RunnableLambda(
-                lambda x: (
-                    "1) CLI 作为前端入口，统一参数与鉴权。\n"
-                    "2) Server 运行 Deep Agent 编排并产出增量 token。\n"
-                    "3) 通过 SSE 持续回传 token，直到 [DONE]。"
-                )
+        try:
+            agent = create_deep_agent(
+                model=model,
+                tools=[],
+                system_prompt=system_prompt,
             )
-            act_chain = act_prompt | RunnableLambda(
-                lambda x: (
-                    f"[session={x['session_id']}] 已按 LangChain Deep Agents 标准化流程执行。\n"
-                    "架构结论：采用 CLI/Server 解耦，Server 统一智能体编排。\n"
-                    "调用流程：前端 -> CLI -> Server -> SSE(token流) -> 前端渲染。\n"
-                    f"最小落地建议：保留当前SSE协议并把业务工具注册到Agent工具层。\nPLAN:\n{x['plan']}"
-                )
-            )
-            return (
+
+            result = await agent.ainvoke(
                 {
-                    "plan": plan_chain | parser,
-                    "session_id": runnables.RunnableLambda(lambda x: x["session_id"]),
-                    "user_input": runnables.RunnableLambda(lambda x: x["user_input"]),
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                f"session_id={session_id}。"
+                                "请给出该需求的架构结论、调用流程和最小落地步骤。"
+                                f"用户输入：{user_input}"
+                            ),
+                        }
+                    ]
                 }
-                | act_chain
-                | parser
+            )
+            extracted = self._extract_text(result)
+            if extracted:
+                return extracted
+            return str(result)
+        except Exception as exc:  # noqa: BLE001
+            return self._fallback(session_id=session_id, user_input=user_input, reason=str(exc))
+
+    def _load_official_deep_agent_factory(self) -> Any | None:
+        candidates = [
+            ("deepagents", "create_deep_agent"),
+            ("langchain_deepagents", "create_deep_agent"),
+            ("langchain.agents", "create_deep_agent"),
+        ]
+        for module_name, func_name in candidates:
+            try:
+                spec = importlib.util.find_spec(module_name)
+            except ModuleNotFoundError:
+                spec = None
+            if spec is None:
+                continue
+            module = importlib.import_module(module_name)
+            factory = getattr(module, func_name, None)
+            if factory is not None:
+                return factory
+        return None
+
+    def _build_model(self) -> Any | None:
+        provider = os.getenv("LLM_PROVIDER", "mock")
+
+        if provider == "mock":
+            if importlib.util.find_spec("langchain_core.language_models.fake") is None:
+                return None
+            FakeListChatModel = importlib.import_module(
+                "langchain_core.language_models.fake"
+            ).FakeListChatModel
+            return FakeListChatModel(
+                responses=[
+                    "架构结论：使用 CLI/Server 解耦 + Server 统一 Deep Agent 编排。\n"
+                    "调用流程：前端 -> CLI -> Server -> SSE token 流 -> 前端渲染。\n"
+                    "落地步骤：1) 定义请求协议 2) Server 接 Deep Agent 3) SSE 回传。"
+                ]
             )
 
-        if importlib.util.find_spec("langchain.chat_models") is None:
+        try:
+            chat_models_spec = importlib.util.find_spec("langchain.chat_models")
+        except ModuleNotFoundError:
+            chat_models_spec = None
+        if chat_models_spec is None:
             return None
-
         init_chat_model = importlib.import_module("langchain.chat_models").init_chat_model
-        model = init_chat_model(model=os.getenv("LLM_MODEL", "gpt-4o-mini"), model_provider=provider)
-
-        plan_chain = plan_prompt | model | parser
-        act_chain = act_prompt | model | parser
-        return (
-            {
-                "plan": plan_chain,
-                "session_id": RunnableLambda(lambda x: x["session_id"]),
-                "user_input": RunnableLambda(lambda x: x["user_input"]),
-            }
-            | act_chain
+        return init_chat_model(
+            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            model_provider=provider,
         )
 
-    def _fallback_response(self, session_id: str, user_input: str) -> str:
+    def _extract_text(self, result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            messages = result.get("messages")
+            if isinstance(messages, list) and messages:
+                last = messages[-1]
+                content = getattr(last, "content", None)
+                if isinstance(content, str):
+                    return content
+                if isinstance(last, dict) and isinstance(last.get("content"), str):
+                    return last["content"]
+        return ""
+
+    def _fallback(self, session_id: str, user_input: str, reason: str) -> str:
         return (
-            f"[session={session_id}] LangChain 依赖未就绪，已使用本地回退路径。"
-            "建议安装 langchain 并配置 LLM_PROVIDER/LLM_MODEL。"
-            f"你的输入是：{user_input}"
+            f"[session={session_id}] 当前走回退路径：{reason}。"
+            "请按官方文档安装/配置 Deep Agents 后重试："
+            "https://docs.langchain.com/oss/python/deepagents/overview 。"
+            f"输入：{user_input}"
         )
