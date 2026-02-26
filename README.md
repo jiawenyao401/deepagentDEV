@@ -16,21 +16,30 @@
 
 ## 快速开始
 
+> Windows / macOS / Linux 通用，先安装 editable 包。
+
 ```bash
-pip install -e .
-uvicorn server.app:app --host 0.0.0.0 --port 8000
+python -m pip install -e .
 ```
 
-另一个终端调用 CLI：
+启动服务端：
 
 ```bash
+python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+另一个终端调用 CLI（两种方式都可以）：
+
+```bash
+deepagent-cli chat "请介绍一下这个平台"
+# 或
 python -m cli.main chat "请介绍一下这个平台"
 ```
 
 如果前端要把 JSON 串直接传给 CLI：
 
 ```bash
-python -m cli.main request-json '{"message":"hello","session_id":"web-001"}'
+deepagent-cli request-json '{"message":"hello","session_id":"web-001"}'
 ```
 
 ## SSE 协议（server -> cli）

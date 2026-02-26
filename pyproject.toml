@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "deep-agents-platform"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI + Server split agent platform with SSE streaming based on LangChain Deep Agents style architecture"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +17,12 @@ dependencies = [
   "pydantic>=2.8.0",
   "langchain>=0.2.0",
 ]
+
+[project.scripts]
+deepagent-cli = "cli.main:app"
+
+[tool.setuptools]
+packages = ["cli", "server", "shared"]
 
 [tool.uv]
 package = false
