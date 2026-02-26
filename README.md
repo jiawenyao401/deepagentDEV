@@ -8,15 +8,27 @@
 
 - **server/**：智能体服务端（FastAPI）
   - 提供 `/v1/chat/stream` SSE 接口
-  - 封装 `DeepAgent`，便于后续接入 LangChain Deep Agents 工作流
+  - `DeepAgent` 已使用 **LangChain 标准 Runnable 编排** 实现 `PLAN -> ACT -> STREAM`
 - **cli/**：命令行客户端（Typer）
   - 接收前端传入参数
   - 调用 server SSE 接口并实时输出 token
 - **shared/**：请求模型共享定义（Pydantic）
 
-## 快速开始
+## LangChain / Deep Agents 标准化实现点
 
-> Windows / macOS / Linux 通用，先安装 editable 包。
+当前 `server/deep_agent.py` 里已经落地：
+
+1. **PLAN 阶段**：先生成 3 步执行计划（可替换成更复杂 planner）。
+2. **ACT 阶段**：根据 PLAN 生成最终答复（可扩展工具调用/多代理协作）。
+3. **STREAM 阶段**：将结果按 token chunk 推送给 SSE 客户端。
+
+你可以通过环境变量切换：
+
+- `LLM_PROVIDER=mock`（默认，本地可直接跑）
+- `LLM_PROVIDER=openai`（示例，需要你本地安装对应 provider 依赖并配置密钥）
+- `LLM_MODEL=gpt-4o-mini`（示例）
+
+## 快速开始
 
 ```bash
 python -m pip install -e .
@@ -28,15 +40,13 @@ python -m pip install -e .
 python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-另一个终端调用 CLI（两种方式都可以）：
+另一个终端调用 CLI：
 
 ```bash
-deepagent-cli chat "请介绍一下这个平台"
-# 或
-python -m cli.main chat "请介绍一下这个平台"
+deepagent-cli chat "帮我设计 Deep Agents 平台"
 ```
 
-如果前端要把 JSON 串直接传给 CLI：
+前端如果直接传 JSON 给 CLI：
 
 ```bash
 deepagent-cli request-json '{"message":"hello","session_id":"web-001"}'
@@ -47,9 +57,3 @@ deepagent-cli request-json '{"message":"hello","session_id":"web-001"}'
 - `event: start`：开始，`data` 为 session_id
 - `event: token`：增量 token
 - `event: end`：结束，`data` 为 `[DONE]`
-
-## 生产化改造建议
-
-1. 在 `server/deep_agent.py` 中将 `_generate_text` 替换为 LangChain Deep Agents 编排。
-2. 增加会话存储（Redis/Postgres）和可观测性（LangSmith/OTel）。
-3. CLI 侧增加鉴权与重试策略，配合前端做超时/取消。
